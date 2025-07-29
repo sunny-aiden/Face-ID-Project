@@ -1,0 +1,13 @@
+{
+  "bad_files_removed": 0,
+  "classes_retained": 1680,
+  "images_retained": 9164,
+  "train_count": 7836,
+  "val_count": 664,
+  "test_count": 664,
+  "img_size": [
+    160,
+    160
+  ],
+  "pixel_norm": "[0,1] applied later in DataLoader"
+}
