@@ -205,8 +205,7 @@ extractor, cnn_model, log_model, svm_model, knn_model, mlp_model = load_all_mode
 @torch.no_grad()
 def embed_1280(x: torch.Tensor):
     """
-    Get 1280-D embeddings from MobileNetV2.
-    Return a plain Python list-of-lists so we never call Tensor.numpy().
+    Return a plain Python list-of-lists (B x 1280) so we never call Tensor.numpy().
     """
     z = extractor(x)
     if not isinstance(z, torch.Tensor):
@@ -219,8 +218,7 @@ def embed_1280(x: torch.Tensor):
     else:
         raise RuntimeError(f"Unexpected extractor output shape: {tuple(z.shape)}")
 
-    # Return list (B, 1280) to avoid .numpy()
-    return z.detach().cpu().to(torch.float32).tolist()
+    return z.detach().cpu().to(torch.float32).tolist()  # <-- list, not .numpy()
 
 # ── UI ─────────────────────────────────────────────────────────────────────
 st.title("🔐 Face-ID Classifier")
@@ -259,7 +257,7 @@ if uploaded:
     if model_choice == "MobileNetV2 (ft)":
         with torch.inference_mode():
             logits = cnn_model(x)
-            probs = torch.softmax(logits, dim=1).squeeze(0).cpu().numpy()
+            idx = int(torch.argmax(logits, dim=1).item()) 
             idx = int(np.argmax(probs))
         label = CLASS_NAMES[idx] if 0 <= idx < len(CLASS_NAMES) else "N/A"
         st.success(f"🏷️ Predicted identity: **{label}**")
