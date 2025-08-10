@@ -11,15 +11,16 @@ Practical face identification built on the **Labeled Faces in the Wild (LFW)** d
 Given a face image, predict its identity among people seen during training. LFW is difficult due to severe class imbalance and small per-identity sample counts. We tackle this via two complementary tracks:
 
 ### A. Classical ML on Embeddings
-- Images are resized/aligned to 160×160 and passed through a pretrained MobileNetV2 (ImageNet) to extract fixed embeddings (global average pooled).  
+- Images are resized/aligned to **160×160** and passed through a pretrained **MobileNetV2 (ImageNet)** to extract fixed embeddings (global average pooled).
 - On top of those embeddings we train:
   - **SGD Logistic Regression** (`sgd-log`)
   - **SGD Linear SVM** (`sgd-svm`)
   - **K-NN** (cosine / euclidean as explored)
-- These are fast, lightweight baselines. They use `joblib.dump` for persistence.
+  - **MLP / ANN** (on PCA-reduced embeddings)
+- Fast, lightweight baselines saved with `joblib.dump`.
 
 ### B. Fine-tuned CNN
-- Start from pretrained MobileNetV2.
+- Start from pretrained **MobileNetV2**.
 - Unfreeze a subset of layers and add dropout; fine-tune end-to-end with augmentation.
 - Hyperparameters (learning rate, weight decay, dropout, unfreeze depth) are searched with **Optuna (TPE)** with early pruning/early stopping.
 - Final model is saved as PyTorch weights.
@@ -29,45 +30,111 @@ Given a face image, predict its identity among people seen during training. LFW 
 ## 2) Dataset (LFW) Details
 
 - **Name:** Labeled Faces in the Wild (LFW)  
-- **Scale:** ~13,233 images over ~5,749 people; ~1,680 people have 2+ images after filtering.  
-- **Challenges:** Heavy class imbalance, many identities with very few samples, unconstrained "in the wild" conditions (pose, lighting, occlusion).
+- **Scale:** ~13,233 images over ~5,749 people; ~**1,680** people have 2+ images after filtering.  
+- **Challenges:** Heavy class imbalance; many identities with very few samples; unconstrained “in the wild” conditions (pose, lighting, occlusion).
 
 **Preprocessing pipeline includes:**
 - Download and clean/split (train/val/test) with fixed seed.
-- Face alignment / resize to 160×160 PNG.
-- Consistent class indexing across splits (empty class folders preserved to avoid shifting label indices).
-- Data augmentation for CNN: random horizontal flip, small rotation, color jitter; normalized to mean=0.5, std=0.5.
+- Standardize to **RGB** and **160×160** resolution (PNG/JPG).
+- Consistent class indexing across splits (empty class folders preserved to avoid label shifts).
+- Data augmentation for CNN: random horizontal flip, small rotation, color jitter; normalize to mean=0.5, std=0.5.
 
 ---
 
 ## 3) Models & Training
 
-### Classical Models
-- Input: fixed MobileNetV2 embeddings (no further fine-tuning).
-- Scaling: `StandardScaler` applied before SGD classifiers.
-- Hyperparameter tuning: small manual/randomized search over `alpha`, `eta0`, learning rate schedule for SGD variants; limited search for KNN (k and metric).
+### Classical Models (on 1280-D deep embeddings)
+- `StandardScaler` before SGD models; **PCA(128/256, whiten)** for MLP.
+- Small manual/randomized search over `alpha`, `eta0`, learning-rate schedule (SGD variants), and `k/metric` (KNN).
 
 ### CNN Fine-tuning
-- Backbone: `torchvision.models.mobilenet_v2` with ImageNet weights.
-- Head: dropout + linear layer adapted to number of classes.
-- Only last N parameters are unfrozen (Optuna choice) to control capacity and overfitting.
-- Optimizer: `AdamW`.
-- Validation monitoring with early stopping; best model checkpointed.
+- `torchvision.models.mobilenet_v2` (ImageNet weights).
+- Replace head with `Dropout + Linear(last_channel → num_classes)`.
+- Partially unfreeze tail (Optuna choice). Optimizer: **AdamW**.
+- Early stopping on validation accuracy; best checkpoint retained.
 
 ---
 
-## 4) Results Summary (as observed)
+## 4) Results Summary
 
-| Model                     | Validation Acc. | Test Acc.       | Notes |
-|--------------------------|-----------------|-----------------|-------|
-| **MobileNetV2 (fine-tuned)** | **0.840**       | ~0.73–0.79      | Optuna-tuned over LR, dropout, weight decay, unfreeze depth; early stopping. |
-| SGD-Logistic (embeddings) | 0.413           | —               | Small manual/random search; fast. |
-| SGD-SVM (embeddings)      | 0.410           | —               | Similar performance to logistic. |
-| K-NN (embeddings)         | 0.247           | —               | Simple non-parametric baseline. |
+| Model                         | Validation Acc. | Test Acc. | Notes |
+|------------------------------|-----------------|-----------|-------|
+| **MobileNetV2 (fine-tuned)** | **0.840**       | **0.848** | Optuna-tuned LR/WD/dropout/unfreeze; early stop. |
+| SGD-Logistic (embeddings)    | 0.387           | 0.392     | Multinomial, SAGA on scaled features. |
+| SGD-SVM (hinge, embeddings)  | 0.407           | 0.384     | Linear margin baseline. |
+| **MLP / ANN** (embeddings)   | 0.417           | 0.374     | StdScaler → PCA → MLP(512), ReLU. |
+| K-NN (cosine, embeddings)    | 0.265           | 0.268     | Non-parametric baseline. |
 
-*Interpretation:* Classical baselines give quick, lightweight signals but are substantially outperformed by the fine-tuned CNN, which adapts features to the specific identity distribution despite class scarcity.
+**Rank:** **CNN ≫ (SVM ≈ MLP ≈ Logistic) ≫ KNN**  
+**Takeaway:** Domain-adapted features from fine-tuning dominate frozen-feature baselines.
 
 ---
 
 ## 5) Repository Structure
 
+```
+Face-ID-Project/
+├── data/
+│   └── processed/
+│       ├── train/                # ImageFolder: one subfolder per identity
+│       ├── val/
+│       └── test/
+├── features/                     # cached deep embeddings: X_*.npy, y_*.npy
+├── models/
+│   ├── mobilenet_v2_best.pkl
+│   ├── logistic_sgd_best.pkl
+│   ├── svm_best.pkl
+│   ├── knn_best.pkl
+│   ├── mlp_embeddings_tuned_best.pkl
+│   └── metrics/
+│       └── all_models_scoreboard.txt
+├── notebooks/                    # EDA / cleaning / modeling / tuning
+├── app.py                        # Streamlit demo
+└── README.md
+```
+
+---
+
+## 6) Setup & Run (Local)
+
+```bash
+python -m venv .venv
+source .venv/bin/activate        # Windows: .venv\Scriptsctivate
+pip install --upgrade pip
+pip install torch torchvision torchaudio
+pip install scikit-learn optuna streamlit pillow matplotlib seaborn tqdm joblib
+```
+
+**Launch the demo:**
+```bash
+streamlit run app.py
+# if port is busy → streamlit run app.py --server.port 8502
+```
+
+*Tip (stop a stuck app):*  
+macOS/Linux: `pkill -f "streamlit run app.py"` or `lsof -ti:8501 | xargs kill -9`  
+Windows: find PID via `netstat -ano | findstr :8501` then `taskkill /PID <PID> /F`
+
+*PyTorch ≥ 2.6 note:* model loading uses safe unpickling and falls back to `weights_only=False` only for trusted checkpoints.
+
+---
+
+## 7) How to Reproduce (Short)
+
+1. **Clean & split:** verify images → RGB → resize 160×160 → `data/processed/{train,val,test}` by identity (fixed seed).  
+2. **Embeddings:** MobileNetV2 conv body + GAP → save `features/X_*.npy, y_*.npy`.  
+3. **Classical models:** train/tune SGD-Logistic, SGD-SVM, KNN, **MLP**; save `*.pkl`.  
+4. **Fine-tune CNN:** replace head, unfreeze tail, augment; tune with Optuna; save `mobilenet_v2_best.pkl`.  
+5. **Demo:** `streamlit run app.py`, upload face image, choose model.
+
+---
+
+## 8) Team Member Roles & Contributions
+
+| Role | Name | Key Contributions |
+|------|------|-------------------|
+| **Project Lead / PM** | _Name_ | Scope, integration, final QA |
+| **Data & Cleaning** | _Name_ | LFW download/verify, RGB/resize, identity-wise split |
+| **EDA & Reporting** | _Name_ | Class distribution, brightness/contrast, visuals |
+| **Modeling – ML** | _Name_ | Embeddings cache, SGD-Log/SVM/KNN/MLP training & tuning |
+| **Modeling – CNN & App** | _Name_ | MobileNetV2 fine-tune, Optuna, checkpoints, Streamlit app |
