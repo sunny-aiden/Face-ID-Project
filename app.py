@@ -140,8 +140,8 @@ def load_all_models():
     extractor.to(device).eval()
 
     # Classical estimators saved as sklearn pipelines
-    log_model = load_sklearn_pickle("logistic_sgd_best.pkl")
-    svm_model = load_sklearn_pickle("svm_best.pkl")
+    log_model = load_sklearn_pickle("sgdlog_best.pkl")
+    svm_model = load_sklearn_pickle("sgdsvm_best.pkl")
     knn_model = load_sklearn_pickle("knn_best.pkl")
     mlp_model = load_sklearn_pickle("mlp_embeddings_tuned_best.pkl")
 
