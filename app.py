@@ -22,6 +22,9 @@ from torchvision import models, transforms
 from torchvision.models.mobilenetv2 import MobileNetV2
 from torchvision.transforms import InterpolationMode
 
+# Optional fallback for display if st.image ever complains
+import matplotlib.pyplot as plt
+
 # Make Pillow tolerant to truncated files (some camera/phone uploads)
 ImageFile.LOAD_TRUNCATED_IMAGES = True
 
@@ -228,14 +231,17 @@ if uploaded:
     # 2) Normalize to fully-loaded PIL RGB
     img = to_pil_rgb(raw_bytes)
 
-    # 3) Display robustly (fallback to PNG re-encode if needed)
+    # 3) Display *as NumPy array* (Streamlit's most robust path)
+    np_img = np.asarray(img)  # H x W x 3, uint8
     try:
-        st.image(img, caption="Your input", use_container_width=True)
+        st.image(np_img, caption="Your input", channels="RGB", use_container_width=True)
     except Exception as e:
-        buf = io.BytesIO()
-        img.save(buf, format="PNG", optimize=True)
-        st.image(buf.getvalue(), caption="Your input", use_container_width=True)
-        st.info(f"(Displayed via PNG re-encode fallback: {e})")
+        # absolute fallback via matplotlib (rarely needed)
+        fig = plt.figure(figsize=(4, 4))
+        plt.imshow(np_img)
+        plt.axis("off")
+        st.pyplot(fig)
+        st.info(f"(Displayed via matplotlib fallback: {e})")
 
     # 4) Tensorize & normalize (must match training)
     x = preprocess(img).unsqueeze(0).to(device)  # [1, 3, H, W], float32
