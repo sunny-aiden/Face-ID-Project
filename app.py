@@ -42,7 +42,6 @@ if not TRAIN_DIR.exists():
 CLASS_NAMES = sorted([d.name for d in TRAIN_DIR.iterdir() if d.is_dir()])
 
 # ── Sidebar: show ONLY test accuracy (rename “Accuracy”) ───────────────────
-# Fill with your final post-tuning test accuracies
 TEST_ACCURACY = {
     "MobileNetV2 (ft)": 0.848,
     "SGD-Logistic":     0.392,
@@ -62,14 +61,12 @@ def to_pil_rgb(img_in: Any) -> Image.Image:
     """
     Normalize any input (UploadedFile / bytes / ndarray / tensor / PIL)
     to a fully-loaded, EXIF-corrected PIL RGB image.
-
-    We force-load with .copy() so there is no open file handle or lazy decoder
-    left when Streamlit tries to serialize the image.
+    We force-load with .copy() so there is no lazy decoder/file handle left.
     """
-    from torchvision import transforms as T  # local import to avoid global ToTensor usage
+    from torchvision import transforms as T  # local import
 
     if isinstance(img_in, Image.Image):
-        img = img_in.copy()  # force load
+        img = img_in.copy()
     elif hasattr(img_in, "read"):  # Streamlit UploadedFile
         img = Image.open(img_in).copy()
     elif isinstance(img_in, (bytes, bytearray)):
@@ -94,26 +91,32 @@ def to_pil_rgb(img_in: Any) -> Image.Image:
 def preprocess_tensor(img: Image.Image) -> torch.Tensor:
     """
     Make a float32 CHW tensor normalized to [-1,1] without using torchvision.ToTensor().
-    This avoids mode/dtype corner cases in torchvision's to_tensor().
+    Guarantees a writable, C-contiguous NumPy array to avoid torch.from_numpy issues.
     """
     # Ensure RGB and deterministic size
     if img.mode != "RGB":
         img = img.convert("RGB")
     img = img.resize(IMG_SIZE, resample=Image.BILINEAR)
 
-    # HWC uint8 -> CHW float32
-    arr = np.asarray(img)
-    if arr.ndim == 2:                 # grayscale -> RGB
-        arr = np.stack([arr]*3, axis=-1)
-    if arr.shape[2] == 4:             # RGBA -> RGB (drop alpha)
-        arr = arr[:, :, :3]
-    arr = arr.astype(np.uint8)
+    # Build a new array that is definitely writable + C-contiguous
+    arr = np.array(img, dtype=np.uint8, copy=True, order="C")  # H x W x (3 or 4)
 
-    tensor = torch.from_numpy(arr).permute(2, 0, 1).contiguous().float() / 255.0
+    # Normalize channels: grayscale/alpha guards (should be rare after convert)
+    if arr.ndim == 2:                         # grayscale -> RGB
+        arr = np.stack([arr]*3, axis=-1)
+    elif arr.shape[2] == 4:                   # RGBA -> RGB (drop alpha)
+        arr = arr[:, :, :3]
+
+    # Ensure contiguous and writeable explicitly
+    if not arr.flags["C_CONTIGUOUS"] or not arr.flags["WRITEABLE"]:
+        arr = np.ascontiguousarray(arr.copy(), dtype=np.uint8)
+
+    # HWC -> CHW, float32 in [0,1]
+    tensor = torch.from_numpy(arr).permute(2, 0, 1).contiguous().to(torch.float32) / 255.0
 
     # Normalize to [-1, 1] with mean=0.5, std=0.5 per channel
-    mean = torch.tensor([0.5, 0.5, 0.5], dtype=tensor.dtype, device=tensor.device).view(3, 1, 1)
-    std  = torch.tensor([0.5, 0.5, 0.5], dtype=tensor.dtype, device=tensor.device).view(3, 1, 1)
+    mean = torch.tensor([0.5, 0.5, 0.5], dtype=torch.float32).view(3, 1, 1)
+    std  = torch.tensor([0.5, 0.5, 0.5], dtype=torch.float32).view(3, 1, 1)
     tensor = (tensor - mean) / std
     return tensor
 
@@ -122,12 +125,8 @@ def torch_load_any(p: Path):
     """
     Load a torch object under safer rules.
     Tries safe loading (weights_only=True) first; falls back if needed.
-
-    Note: torch.serialization.add_safe_globals exists on newer PyTorch.
-    On older versions this call is ignored by the try/except.
     """
     try:
-        # Allow MobileNetV2 class during safe unpickling (if needed).
         torch.serialization.add_safe_globals([MobileNetV2])
     except Exception:
         pass
@@ -135,14 +134,12 @@ def torch_load_any(p: Path):
     try:
         return torch.load(p, map_location=device, weights_only=True)
     except Exception:
-        # Fallback only for trusted checkpoints produced by your own code.
         return torch.load(p, map_location=device, weights_only=False)
 
 def load_finetuned_mobilenet(n_classes: int) -> nn.Module:
     """
     Load MobileNetV2 fine-tuned model from a .pkl file.
-    Supports two checkpoint styles:
-      (1) full nn.Module; (2) state_dict or {"state_dict": ...}.
+    Supports two checkpoint styles: (1) full nn.Module; (2) state_dict / {"state_dict": ...}.
     Ensures the classifier head matches the number of classes.
     """
     ckpt = MODELS_DIR / "mobilenet_v2_best.pkl"
@@ -152,7 +149,6 @@ def load_finetuned_mobilenet(n_classes: int) -> nn.Module:
 
     obj = torch_load_any(ckpt)
 
-    # base with ImageNet weights (swap head later as needed)
     def build_blank(nc: int):
         m = models.mobilenet_v2(weights=models.MobileNet_V2_Weights.IMAGENET1K_V1)
         m.classifier[1] = nn.Linear(m.last_channel, nc)
@@ -160,7 +156,6 @@ def load_finetuned_mobilenet(n_classes: int) -> nn.Module:
 
     if isinstance(obj, nn.Module):
         model = obj
-        # (optional) repair head if classes changed
         try:
             out = model.classifier[1].out_features
             if out != n_classes:
@@ -169,11 +164,10 @@ def load_finetuned_mobilenet(n_classes: int) -> nn.Module:
             pass
         return model.to(device).eval()
 
-    # dict / state_dict path
     model = build_blank(n_classes)
     if isinstance(obj, (dict, OrderedDict)):
         state = obj.get("state_dict", obj)
-        model.load_state_dict(state, strict=False)  # tolerate minor key mismatches
+        model.load_state_dict(state, strict=False)
         return model.to(device).eval()
 
     st.error("Unsupported checkpoint format for MobileNetV2.")
@@ -197,16 +191,12 @@ def load_sklearn_pickle(name: str) -> Optional[Any]:
 # ── Load models (cached) ───────────────────────────────────────────────────
 @st.cache_resource(show_spinner=True)
 def load_all_models():
-    # End-to-end CNN
     cnn = load_finetuned_mobilenet(len(CLASS_NAMES))
 
-    # Feature extractor: MobileNetV2 forward with classifier set to Identity
-    # still returns the 1280-D pooled vector in torchvision (keeps avgpool).
     extractor = models.mobilenet_v2(weights=models.MobileNet_V2_Weights.IMAGENET1K_V1)
-    extractor.classifier = nn.Identity()
+    extractor.classifier = nn.Identity()  # keep avgpool inside forward
     extractor.to(device).eval()
 
-    # Classical estimators saved as sklearn pipelines
     log_model = load_sklearn_pickle("sgdlog_best.pkl")
     svm_model = load_sklearn_pickle("sgdsvm_best.pkl")
     knn_model = load_sklearn_pickle("knn_best.pkl")
@@ -220,8 +210,7 @@ extractor, cnn_model, log_model, svm_model, knn_model, mlp_model = load_all_mode
 def embed_1280(x: torch.Tensor) -> np.ndarray:
     """
     Get 1280-D embeddings from MobileNetV2.
-    If extractor returns (B, 1280), use it.
-    If it returns (B, 1280, H, W), pool+flatten.
+    If extractor returns (B, 1280), use it. If (B, 1280, H, W), pool+flatten.
     """
     z = extractor(x)
     if not isinstance(z, torch.Tensor):
@@ -250,12 +239,11 @@ if uploaded:
     # 2) Normalize to fully-loaded PIL RGB
     img = to_pil_rgb(raw_bytes)
 
-    # 3) Display *as NumPy array* (Streamlit's most robust path)
-    np_img = np.asarray(img)  # H x W x 3, uint8
+    # 3) Display as NumPy array (robust path)
+    np_img = np.array(img, dtype=np.uint8, copy=True, order="C")
     try:
         st.image(np_img, caption="Your input", channels="RGB", use_container_width=True)
     except Exception as e:
-        # absolute fallback via matplotlib (rarely needed)
         fig = plt.figure(figsize=(4, 4))
         plt.imshow(np_img)
         plt.axis("off")
@@ -264,8 +252,8 @@ if uploaded:
 
     # 4) Tensorize & normalize (must match training) — no torchvision.ToTensor()
     x = preprocess_tensor(img).unsqueeze(0).to(device)  # [1, 3, H, W], float32
-    # Optional debug:
-    # st.write("tensor:", x.shape, x.dtype, float(x.min()), float(x.max()))
+    # Debug (optional):
+    # st.write("x:", x.shape, x.dtype, float(x.min()), float(x.max()))
 
     if model_choice == "MobileNetV2 (ft)":
         with torch.inference_mode():
@@ -276,7 +264,6 @@ if uploaded:
         st.success(f"🏷️ Predicted identity: **{label}**")
 
     else:
-        # Classical models: first get 1280-D embeddings
         feats = embed_1280(x)
         chosen = None
         if model_choice == "SGD-Logistic":
