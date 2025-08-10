@@ -11,7 +11,7 @@ from pathlib import Path
 from typing import Any, Optional
 
 import joblib
-import numpy as np  # still used for tables etc., but NOT for tensor conversion
+import numpy as np  # used for tables / safe image display (not for torch bridge)
 import pandas as pd
 import streamlit as st
 import torch
@@ -21,10 +21,7 @@ from torch import nn
 from torchvision import models
 from torchvision.models.mobilenetv2 import MobileNetV2
 
-# Optional fallback for display
-import matplotlib.pyplot as plt
-
-# Make Pillow tolerant to truncated files (some camera/phone uploads)
+# Make Pillow tolerant to truncated files
 ImageFile.LOAD_TRUNCATED_IMAGES = True
 
 # ── Paths & device ─────────────────────────────────────────────────────────
@@ -54,15 +51,11 @@ acc_rows = [{"Model": k, "Accuracy": f"{v:.3f}"} for k, v in TEST_ACCURACY.items
 acc_df = pd.DataFrame(acc_rows).sort_values("Accuracy", ascending=False)
 st.sidebar.dataframe(acc_df, hide_index=True, use_container_width=True)
 
-# ── Image preprocessing (must match training) ──────────────────────────────
+# ── Image helpers ──────────────────────────────────────────────────────────
 IMG_SIZE = (160, 160)
 
 def to_pil_rgb(img_in: Any) -> Image.Image:
-    """
-    Normalize any input (UploadedFile / bytes / ndarray / tensor / PIL)
-    to a fully-loaded, EXIF-corrected PIL RGB image.
-    We force-load with .copy() so there is no lazy decoder/file handle left.
-    """
+    """Normalize any input to a fully-loaded, EXIF-corrected PIL RGB image."""
     from torchvision import transforms as T  # local import
 
     if isinstance(img_in, Image.Image):
@@ -90,23 +83,18 @@ def to_pil_rgb(img_in: Any) -> Image.Image:
 
 def preprocess_tensor_no_numpy(img: Image.Image) -> torch.Tensor:
     """
-    Convert PIL RGB image to CHW float32 tensor in [-1, 1] WITHOUT NumPy.
-    Uses torch.frombuffer or a safe fallback to avoid torch.from_numpy.
+    Convert PIL RGB image to CHW float32 tensor in [-1, 1] WITHOUT NumPy bridge.
     """
-    # Ensure RGB and fixed size
     if img.mode != "RGB":
         img = img.convert("RGB")
     img = img.resize(IMG_SIZE, resample=Image.BILINEAR)
 
-    w, h = img.size  # PIL gives (width, height)
-    raw = img.tobytes()  # length = h*w*3 (RGB)
+    w, h = img.size
+    raw = img.tobytes()                   # length = h*w*3
 
     # Create uint8 tensor from raw bytes without NumPy
-    if hasattr(torch, "frombuffer"):
-        t = torch.frombuffer(raw, dtype=torch.uint8)  # zero-copy view
-    else:
-        # Portable fallback: materialize from iterable (slower but safe)
-        t = torch.tensor(memoryview(raw), dtype=torch.uint8)
+    t = torch.frombuffer(raw, dtype=torch.uint8) if hasattr(torch, "frombuffer") \
+        else torch.tensor(memoryview(raw), dtype=torch.uint8)
 
     t = t.view(h, w, 3).permute(2, 0, 1).contiguous().to(torch.float32) / 255.0
 
@@ -118,26 +106,18 @@ def preprocess_tensor_no_numpy(img: Image.Image) -> torch.Tensor:
 
 # ── Robust Torch loaders ───────────────────────────────────────────────────
 def torch_load_any(p: Path):
-    """
-    Load a torch object under safer rules.
-    Tries safe loading (weights_only=True) first; falls back if needed.
-    """
+    """Try safe loading (weights_only=True) then fallback for trusted checkpoints."""
     try:
         torch.serialization.add_safe_globals([MobileNetV2])
     except Exception:
         pass
-
     try:
         return torch.load(p, map_location=device, weights_only=True)
     except Exception:
         return torch.load(p, map_location=device, weights_only=False)
 
 def load_finetuned_mobilenet(n_classes: int) -> nn.Module:
-    """
-    Load MobileNetV2 fine-tuned model from a .pkl file.
-    Supports two checkpoint styles: (1) full nn.Module; (2) state_dict / {"state_dict": ...}.
-    Ensures the classifier head matches the number of classes.
-    """
+    """Load MobileNetV2 fine-tuned model from .pkl (module or state_dict)."""
     ckpt = MODELS_DIR / "mobilenet_v2_best.pkl"
     if not ckpt.exists():
         st.error(f"Missing model file: {ckpt}")
@@ -170,10 +150,7 @@ def load_finetuned_mobilenet(n_classes: int) -> nn.Module:
     st.stop()
 
 def load_sklearn_pickle(name: str) -> Optional[Any]:
-    """
-    Load sklearn/joblib artifacts with friendly error messages.
-    Returns None if loading fails so the UI can degrade gracefully.
-    """
+    """Load sklearn/joblib artifact; return None on failure (UI can degrade)."""
     p = MODELS_DIR / name
     if not p.exists():
         st.warning(f"Missing model file: {p}")
@@ -205,7 +182,8 @@ extractor, cnn_model, log_model, svm_model, knn_model, mlp_model = load_all_mode
 @torch.no_grad()
 def embed_1280(x: torch.Tensor):
     """
-    Return a plain Python list-of-lists (B x 1280) so we never call Tensor.numpy().
+    Get 1280-D embeddings from MobileNetV2 and return as plain Python list-of-lists.
+    Avoids Tensor.numpy() entirely.
     """
     z = extractor(x)
     if not isinstance(z, torch.Tensor):
@@ -217,8 +195,7 @@ def embed_1280(x: torch.Tensor):
         z = torch.flatten(z, 1)
     else:
         raise RuntimeError(f"Unexpected extractor output shape: {tuple(z.shape)}")
-
-    return z.detach().cpu().to(torch.float32).tolist()  # <-- list, not .numpy()
+    return z.detach().cpu().to(torch.float32).tolist()
 
 # ── UI ─────────────────────────────────────────────────────────────────────
 st.title("🔐 Face-ID Classifier")
@@ -230,41 +207,28 @@ model_choice = st.selectbox(
 )
 
 if uploaded:
-    # 1) Detach from the upload stream to avoid lazy file handles
+    # 1) Fully load image as PIL RGB
     raw_bytes = uploaded.getvalue()
-
-    # 2) Normalize to fully-loaded PIL RGB
     img = to_pil_rgb(raw_bytes)
 
-    # 3) Display (fix: use_column_width for Streamlit 1.36)
-    try:
-        st.image(img, caption="Your input", use_column_width=True)
-    except Exception as e:
-        # Last-resort fallback
-        np_img = np.array(img, dtype=np.uint8, copy=True, order="C")
-        try:
-            st.image(np_img, caption="Your input", channels="RGB", use_column_width=True)
-        except Exception:
-            fig = plt.figure(figsize=(4, 4))
-            plt.imshow(np_img)
-            plt.axis("off")
-            st.pyplot(fig)
+    # 2) Display (simple, robust)
+    st.image(img, caption="Your input")
 
-    # 4) Tensorize & normalize WITHOUT NumPy/ToTensor
-    x = preprocess_tensor_no_numpy(img).unsqueeze(0).to(device)  # [1, 3, H, W], float32
-    # st.write("x:", x.shape, x.dtype, float(x.min()), float(x.max()))  # debug
+    # 3) Tensorize (no NumPy bridge)
+    x = preprocess_tensor_no_numpy(img).unsqueeze(0).to(device)  # [1, 3, H, W]
 
     if model_choice == "MobileNetV2 (ft)":
+        # Torch-only path (no numpy)
         with torch.inference_mode():
-            logits = cnn_model(x)
-            idx = int(torch.argmax(logits, dim=1).item()) 
-            idx = int(np.argmax(probs))
+            logits = cnn_model(x)                              # [1, C]
+            idx = int(torch.argmax(logits, dim=1).item())
+            # Optional: prob = torch.softmax(logits, dim=1)[0, idx].item()
         label = CLASS_NAMES[idx] if 0 <= idx < len(CLASS_NAMES) else "N/A"
         st.success(f"🏷️ Predicted identity: **{label}**")
 
     else:
+        # Classical models: list-of-lists (sklearn will np.asarray inside)
         feats = embed_1280(x)
-        chosen = None
         if model_choice == "SGD-Logistic":
             chosen = log_model
         elif model_choice == "SGD-SVM":
