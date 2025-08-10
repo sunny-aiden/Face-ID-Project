@@ -11,7 +11,7 @@ from pathlib import Path
 from typing import Any, Optional
 
 import joblib
-import numpy as np
+import numpy as np  # still used for tables etc., but NOT for tensor conversion
 import pandas as pd
 import streamlit as st
 import torch
@@ -21,7 +21,7 @@ from torch import nn
 from torchvision import models
 from torchvision.models.mobilenetv2 import MobileNetV2
 
-# Optional fallback for display if st.image ever complains
+# Optional fallback for display
 import matplotlib.pyplot as plt
 
 # Make Pillow tolerant to truncated files (some camera/phone uploads)
@@ -88,37 +88,33 @@ def to_pil_rgb(img_in: Any) -> Image.Image:
         img = img.convert("RGB")
     return img
 
-def preprocess_tensor(img: Image.Image) -> torch.Tensor:
+def preprocess_tensor_no_numpy(img: Image.Image) -> torch.Tensor:
     """
-    Make a float32 CHW tensor normalized to [-1,1] without using torchvision.ToTensor().
-    Guarantees a writable, C-contiguous NumPy array to avoid torch.from_numpy issues.
+    Convert PIL RGB image to CHW float32 tensor in [-1, 1] WITHOUT NumPy.
+    Uses torch.frombuffer or a safe fallback to avoid torch.from_numpy.
     """
-    # Ensure RGB and deterministic size
+    # Ensure RGB and fixed size
     if img.mode != "RGB":
         img = img.convert("RGB")
     img = img.resize(IMG_SIZE, resample=Image.BILINEAR)
 
-    # Build a new array that is definitely writable + C-contiguous
-    arr = np.array(img, dtype=np.uint8, copy=True, order="C")  # H x W x (3 or 4)
+    w, h = img.size  # PIL gives (width, height)
+    raw = img.tobytes()  # length = h*w*3 (RGB)
 
-    # Normalize channels: grayscale/alpha guards (should be rare after convert)
-    if arr.ndim == 2:                         # grayscale -> RGB
-        arr = np.stack([arr]*3, axis=-1)
-    elif arr.shape[2] == 4:                   # RGBA -> RGB (drop alpha)
-        arr = arr[:, :, :3]
+    # Create uint8 tensor from raw bytes without NumPy
+    if hasattr(torch, "frombuffer"):
+        t = torch.frombuffer(raw, dtype=torch.uint8)  # zero-copy view
+    else:
+        # Portable fallback: materialize from iterable (slower but safe)
+        t = torch.tensor(memoryview(raw), dtype=torch.uint8)
 
-    # Ensure contiguous and writeable explicitly
-    if not arr.flags["C_CONTIGUOUS"] or not arr.flags["WRITEABLE"]:
-        arr = np.ascontiguousarray(arr.copy(), dtype=np.uint8)
+    t = t.view(h, w, 3).permute(2, 0, 1).contiguous().to(torch.float32) / 255.0
 
-    # HWC -> CHW, float32 in [0,1]
-    tensor = torch.from_numpy(arr).permute(2, 0, 1).contiguous().to(torch.float32) / 255.0
-
-    # Normalize to [-1, 1] with mean=0.5, std=0.5 per channel
+    # Normalize to [-1, 1]
     mean = torch.tensor([0.5, 0.5, 0.5], dtype=torch.float32).view(3, 1, 1)
     std  = torch.tensor([0.5, 0.5, 0.5], dtype=torch.float32).view(3, 1, 1)
-    tensor = (tensor - mean) / std
-    return tensor
+    t = (t - mean) / std
+    return t
 
 # ── Robust Torch loaders ───────────────────────────────────────────────────
 def torch_load_any(p: Path):
@@ -239,21 +235,23 @@ if uploaded:
     # 2) Normalize to fully-loaded PIL RGB
     img = to_pil_rgb(raw_bytes)
 
-    # 3) Display as NumPy array (robust path)
-    np_img = np.array(img, dtype=np.uint8, copy=True, order="C")
+    # 3) Display (fix: use_column_width for Streamlit 1.36)
     try:
-        st.image(np_img, caption="Your input", channels="RGB", use_container_width=True)
+        st.image(img, caption="Your input", use_column_width=True)
     except Exception as e:
-        fig = plt.figure(figsize=(4, 4))
-        plt.imshow(np_img)
-        plt.axis("off")
-        st.pyplot(fig)
-        st.info(f"(Displayed via matplotlib fallback: {e})")
+        # Last-resort fallback
+        np_img = np.array(img, dtype=np.uint8, copy=True, order="C")
+        try:
+            st.image(np_img, caption="Your input", channels="RGB", use_column_width=True)
+        except Exception:
+            fig = plt.figure(figsize=(4, 4))
+            plt.imshow(np_img)
+            plt.axis("off")
+            st.pyplot(fig)
 
-    # 4) Tensorize & normalize (must match training) — no torchvision.ToTensor()
-    x = preprocess_tensor(img).unsqueeze(0).to(device)  # [1, 3, H, W], float32
-    # Debug (optional):
-    # st.write("x:", x.shape, x.dtype, float(x.min()), float(x.max()))
+    # 4) Tensorize & normalize WITHOUT NumPy/ToTensor
+    x = preprocess_tensor_no_numpy(img).unsqueeze(0).to(device)  # [1, 3, H, W], float32
+    # st.write("x:", x.shape, x.dtype, float(x.min()), float(x.max()))  # debug
 
     if model_choice == "MobileNetV2 (ft)":
         with torch.inference_mode():
