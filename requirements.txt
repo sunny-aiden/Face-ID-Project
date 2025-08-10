@@ -12,5 +12,5 @@ torchaudio==2.2.2+cpu
 
 scikit-learn==1.6.1
 matplotlib==3.8.4
-# (선택) rich<14로 고정하면 경고 사라짐
-rich==13.9.4
+# 
+rich<14
