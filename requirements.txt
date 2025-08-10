@@ -1,13 +1,15 @@
 --extra-index-url https://download.pytorch.org/whl/cpu
 
 streamlit==1.36.0
-pandas==2.2.2
-numpy==1.26.4
-pillow==10.3.0
-torch==2.2.2+cpu
-torchvision==0.17.2+cpu
-torchaudio==2.2.2+cpu
+# 3.13 휠 있는 버전들로 상향
+pandas==2.2.3
+numpy==2.0.2
+pillow==11.0.0
 
-scikit-learn==1.4.2
-matplotlib==3.8.4
-# ... (your other libs)
+# PyTorch trio (3.13 지원 라인)
+torch==2.5.*+cpu
+torchvision==0.20.*+cpu
+torchaudio==2.5.*+cpu
+
+scikit-learn==1.5.2
+matplotlib==3.9.1
