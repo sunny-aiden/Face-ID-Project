@@ -203,21 +203,24 @@ def load_all_models():
 extractor, cnn_model, log_model, svm_model, knn_model, mlp_model = load_all_models()
 
 @torch.no_grad()
-def embed_1280(x: torch.Tensor) -> np.ndarray:
+def embed_1280(x: torch.Tensor):
     """
     Get 1280-D embeddings from MobileNetV2.
-    If extractor returns (B, 1280), use it. If (B, 1280, H, W), pool+flatten.
+    Return a plain Python list-of-lists so we never call Tensor.numpy().
     """
     z = extractor(x)
     if not isinstance(z, torch.Tensor):
         raise RuntimeError("Extractor did not return a tensor.")
     if z.ndim == 2 and z.shape[1] == 1280:
-        return z.cpu().numpy()
-    if z.ndim == 4 and z.shape[1] == 1280:
+        pass
+    elif z.ndim == 4 and z.shape[1] == 1280:
         z = F.adaptive_avg_pool2d(z, (1, 1))
         z = torch.flatten(z, 1)
-        return z.cpu().numpy()
-    raise RuntimeError(f"Unexpected extractor output shape: {tuple(z.shape)}")
+    else:
+        raise RuntimeError(f"Unexpected extractor output shape: {tuple(z.shape)}")
+
+    # Return list (B, 1280) to avoid .numpy()
+    return z.detach().cpu().to(torch.float32).tolist()
 
 # ── UI ─────────────────────────────────────────────────────────────────────
 st.title("🔐 Face-ID Classifier")
