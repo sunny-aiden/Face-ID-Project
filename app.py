@@ -18,9 +18,8 @@ import torch
 import torch.nn.functional as F
 from PIL import Image, ImageOps, ImageFile
 from torch import nn
-from torchvision import models, transforms
+from torchvision import models
 from torchvision.models.mobilenetv2 import MobileNetV2
-from torchvision.transforms import InterpolationMode
 
 # Optional fallback for display if st.image ever complains
 import matplotlib.pyplot as plt
@@ -57,15 +56,7 @@ acc_df = pd.DataFrame(acc_rows).sort_values("Accuracy", ascending=False)
 st.sidebar.dataframe(acc_df, hide_index=True, use_container_width=True)
 
 # ── Image preprocessing (must match training) ──────────────────────────────
-# If training used different stats/size (e.g., ImageNet 224 / mean/std),
-# update IMG_SIZE and Normalize below accordingly.
 IMG_SIZE = (160, 160)
-preprocess = transforms.Compose([
-    transforms.Resize(IMG_SIZE, interpolation=InterpolationMode.BILINEAR),
-    transforms.ToTensor(),                          # -> float32 [0,1]
-    transforms.Normalize([0.5, 0.5, 0.5],           # center to [-1,1]
-                         [0.5, 0.5, 0.5]),
-])
 
 def to_pil_rgb(img_in: Any) -> Image.Image:
     """
@@ -75,6 +66,8 @@ def to_pil_rgb(img_in: Any) -> Image.Image:
     We force-load with .copy() so there is no open file handle or lazy decoder
     left when Streamlit tries to serialize the image.
     """
+    from torchvision import transforms as T  # local import to avoid global ToTensor usage
+
     if isinstance(img_in, Image.Image):
         img = img_in.copy()  # force load
     elif hasattr(img_in, "read"):  # Streamlit UploadedFile
@@ -89,7 +82,7 @@ def to_pil_rgb(img_in: Any) -> Image.Image:
             arr = arr.astype(np.uint8)
         img = Image.fromarray(arr).copy()
     elif isinstance(img_in, torch.Tensor):
-        img = transforms.functional.to_pil_image(img_in.detach().cpu()).copy()
+        img = T.functional.to_pil_image(img_in.detach().cpu()).copy()
     else:
         raise TypeError(f"Unsupported input type: {type(img_in)}")
 
@@ -97,6 +90,32 @@ def to_pil_rgb(img_in: Any) -> Image.Image:
     if img.mode != "RGB":
         img = img.convert("RGB")
     return img
+
+def preprocess_tensor(img: Image.Image) -> torch.Tensor:
+    """
+    Make a float32 CHW tensor normalized to [-1,1] without using torchvision.ToTensor().
+    This avoids mode/dtype corner cases in torchvision's to_tensor().
+    """
+    # Ensure RGB and deterministic size
+    if img.mode != "RGB":
+        img = img.convert("RGB")
+    img = img.resize(IMG_SIZE, resample=Image.BILINEAR)
+
+    # HWC uint8 -> CHW float32
+    arr = np.asarray(img)
+    if arr.ndim == 2:                 # grayscale -> RGB
+        arr = np.stack([arr]*3, axis=-1)
+    if arr.shape[2] == 4:             # RGBA -> RGB (drop alpha)
+        arr = arr[:, :, :3]
+    arr = arr.astype(np.uint8)
+
+    tensor = torch.from_numpy(arr).permute(2, 0, 1).contiguous().float() / 255.0
+
+    # Normalize to [-1, 1] with mean=0.5, std=0.5 per channel
+    mean = torch.tensor([0.5, 0.5, 0.5], dtype=tensor.dtype, device=tensor.device).view(3, 1, 1)
+    std  = torch.tensor([0.5, 0.5, 0.5], dtype=tensor.dtype, device=tensor.device).view(3, 1, 1)
+    tensor = (tensor - mean) / std
+    return tensor
 
 # ── Robust Torch loaders ───────────────────────────────────────────────────
 def torch_load_any(p: Path):
@@ -243,8 +262,10 @@ if uploaded:
         st.pyplot(fig)
         st.info(f"(Displayed via matplotlib fallback: {e})")
 
-    # 4) Tensorize & normalize (must match training)
-    x = preprocess(img).unsqueeze(0).to(device)  # [1, 3, H, W], float32
+    # 4) Tensorize & normalize (must match training) — no torchvision.ToTensor()
+    x = preprocess_tensor(img).unsqueeze(0).to(device)  # [1, 3, H, W], float32
+    # Optional debug:
+    # st.write("tensor:", x.shape, x.dtype, float(x.min()), float(x.max()))
 
     if model_choice == "MobileNetV2 (ft)":
         with torch.inference_mode():
