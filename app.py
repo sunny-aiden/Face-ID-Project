@@ -3,9 +3,12 @@
 # Models: MobileNetV2 (fine-tuned), SGD-Logistic, SGD-SVM, MLP/ANN, KNN (cosine).
 # Classical models consume 1280-D embeddings from MobileNetV2 (conv body + GAP).
 
+from __future__ import annotations
+
 import io
 from collections import OrderedDict
 from pathlib import Path
+from typing import Any, Optional
 
 import joblib
 import numpy as np
@@ -13,11 +16,14 @@ import pandas as pd
 import streamlit as st
 import torch
 import torch.nn.functional as F
-from PIL import Image, ImageOps
+from PIL import Image, ImageOps, ImageFile
+from torch import nn
 from torchvision import models, transforms
 from torchvision.models.mobilenetv2 import MobileNetV2
 from torchvision.transforms import InterpolationMode
-from torch import nn
+
+# Make Pillow tolerant to truncated files (some camera/phone uploads)
+ImageFile.LOAD_TRUNCATED_IMAGES = True
 
 # ── Paths & device ─────────────────────────────────────────────────────────
 PROJECT_ROOT = Path(__file__).parent
@@ -48,8 +54,8 @@ acc_df = pd.DataFrame(acc_rows).sort_values("Accuracy", ascending=False)
 st.sidebar.dataframe(acc_df, hide_index=True, use_container_width=True)
 
 # ── Image preprocessing (must match training) ──────────────────────────────
-# If you trained with different size/norm (e.g., ImageNet stats at 224),
-# update IMG_SIZE and mean/std accordingly.
+# If training used different stats/size (e.g., ImageNet 224 / mean/std),
+# update IMG_SIZE and Normalize below accordingly.
 IMG_SIZE = (160, 160)
 preprocess = transforms.Compose([
     transforms.Resize(IMG_SIZE, interpolation=InterpolationMode.BILINEAR),
@@ -58,25 +64,29 @@ preprocess = transforms.Compose([
                          [0.5, 0.5, 0.5]),
 ])
 
-def to_pil_rgb(img_in):
-    """Normalize any input (UploadedFile/bytes/ndarray/tensor/PIL) to PIL RGB.
-       Also applies EXIF orientation fix to keep faces upright."""
+def to_pil_rgb(img_in: Any) -> Image.Image:
+    """
+    Normalize any input (UploadedFile / bytes / ndarray / tensor / PIL)
+    to a fully-loaded, EXIF-corrected PIL RGB image.
+
+    We force-load with .copy() so there is no open file handle or lazy decoder
+    left when Streamlit tries to serialize the image.
+    """
     if isinstance(img_in, Image.Image):
-        img = img_in
+        img = img_in.copy()  # force load
     elif hasattr(img_in, "read"):  # Streamlit UploadedFile
-        img = Image.open(img_in)
+        img = Image.open(img_in).copy()
     elif isinstance(img_in, (bytes, bytearray)):
-        img = Image.open(io.BytesIO(img_in))
+        img = Image.open(io.BytesIO(img_in)).copy()
     elif isinstance(img_in, np.ndarray):
         arr = img_in
         if arr.dtype != np.uint8:
-            # scale float images in [0,1] to [0,255]
             if arr.dtype.kind == "f":
                 arr = np.clip(arr, 0, 1) * 255.0
             arr = arr.astype(np.uint8)
-        img = Image.fromarray(arr)
+        img = Image.fromarray(arr).copy()
     elif isinstance(img_in, torch.Tensor):
-        img = transforms.functional.to_pil_image(img_in.detach().cpu())
+        img = transforms.functional.to_pil_image(img_in.detach().cpu()).copy()
     else:
         raise TypeError(f"Unsupported input type: {type(img_in)}")
 
@@ -87,10 +97,15 @@ def to_pil_rgb(img_in):
 
 # ── Robust Torch loaders ───────────────────────────────────────────────────
 def torch_load_any(p: Path):
-    """Load a torch object under safer rules.
-       Tries safe loading (weights_only=True) first; falls back if needed."""
+    """
+    Load a torch object under safer rules.
+    Tries safe loading (weights_only=True) first; falls back if needed.
+
+    Note: torch.serialization.add_safe_globals exists on newer PyTorch.
+    On older versions this call is ignored by the try/except.
+    """
     try:
-        # Allow MobileNetV2 class to be used during safe unpickling.
+        # Allow MobileNetV2 class during safe unpickling (if needed).
         torch.serialization.add_safe_globals([MobileNetV2])
     except Exception:
         pass
@@ -101,12 +116,12 @@ def torch_load_any(p: Path):
         # Fallback only for trusted checkpoints produced by your own code.
         return torch.load(p, map_location=device, weights_only=False)
 
-def load_finetuned_mobilenet(n_classes: int):
+def load_finetuned_mobilenet(n_classes: int) -> nn.Module:
     """
     Load MobileNetV2 fine-tuned model from a .pkl file.
     Supports two checkpoint styles:
-      (1) full nn.Module; (2) (state_dict) or {"state_dict": ...}.
-    Also ensures the classifier head matches the number of classes.
+      (1) full nn.Module; (2) state_dict or {"state_dict": ...}.
+    Ensures the classifier head matches the number of classes.
     """
     ckpt = MODELS_DIR / "mobilenet_v2_best.pkl"
     if not ckpt.exists():
@@ -115,7 +130,7 @@ def load_finetuned_mobilenet(n_classes: int):
 
     obj = torch_load_any(ckpt)
 
-    # base with ImageNet weights (swap head later)
+    # base with ImageNet weights (swap head later as needed)
     def build_blank(nc: int):
         m = models.mobilenet_v2(weights=models.MobileNet_V2_Weights.IMAGENET1K_V1)
         m.classifier[1] = nn.Linear(m.last_channel, nc)
@@ -132,7 +147,7 @@ def load_finetuned_mobilenet(n_classes: int):
             pass
         return model.to(device).eval()
 
-    # dict or state_dict path
+    # dict / state_dict path
     model = build_blank(n_classes)
     if isinstance(obj, (dict, OrderedDict)):
         state = obj.get("state_dict", obj)
@@ -142,9 +157,11 @@ def load_finetuned_mobilenet(n_classes: int):
     st.error("Unsupported checkpoint format for MobileNetV2.")
     st.stop()
 
-def load_sklearn_pickle(name: str):
-    """Load sklearn/joblib artifacts with friendly error messages.
-       Returns None if loading fails so the UI can degrade gracefully."""
+def load_sklearn_pickle(name: str) -> Optional[Any]:
+    """
+    Load sklearn/joblib artifacts with friendly error messages.
+    Returns None if loading fails so the UI can degrade gracefully.
+    """
     p = MODELS_DIR / name
     if not p.exists():
         st.warning(f"Missing model file: {p}")
@@ -161,10 +178,10 @@ def load_all_models():
     # End-to-end CNN
     cnn = load_finetuned_mobilenet(len(CLASS_NAMES))
 
-    # Feature extractor: we’ll use MobileNetV2 forward output as 1280-D embeddings.
-    # With classifier kept as Identity, torchvision’s forward already applies avgpool+flatten.
+    # Feature extractor: MobileNetV2 forward with classifier set to Identity
+    # still returns the 1280-D pooled vector in torchvision (keeps avgpool).
     extractor = models.mobilenet_v2(weights=models.MobileNet_V2_Weights.IMAGENET1K_V1)
-    extractor.classifier = nn.Identity()  # keep avgpool inside forward
+    extractor.classifier = nn.Identity()
     extractor.to(device).eval()
 
     # Classical estimators saved as sklearn pipelines
@@ -181,8 +198,8 @@ extractor, cnn_model, log_model, svm_model, knn_model, mlp_model = load_all_mode
 def embed_1280(x: torch.Tensor) -> np.ndarray:
     """
     Get 1280-D embeddings from MobileNetV2.
-    If extractor already returns (B, 1280), use it.
-    If it returns a spatial map (B, 1280, H, W), pool+flatten.
+    If extractor returns (B, 1280), use it.
+    If it returns (B, 1280, H, W), pool+flatten.
     """
     z = extractor(x)
     if not isinstance(z, torch.Tensor):
@@ -205,10 +222,22 @@ model_choice = st.selectbox(
 )
 
 if uploaded:
-    # Normalize all inputs to PIL RGB; prevents ToTensor()/dtype/mode issues
-    img = to_pil_rgb(uploaded)
-    st.image(img, caption="Your input", use_container_width=True)
+    # 1) Detach from the upload stream to avoid lazy file handles
+    raw_bytes = uploaded.getvalue()
 
+    # 2) Normalize to fully-loaded PIL RGB
+    img = to_pil_rgb(raw_bytes)
+
+    # 3) Display robustly (fallback to PNG re-encode if needed)
+    try:
+        st.image(img, caption="Your input", use_container_width=True)
+    except Exception as e:
+        buf = io.BytesIO()
+        img.save(buf, format="PNG", optimize=True)
+        st.image(buf.getvalue(), caption="Your input", use_container_width=True)
+        st.info(f"(Displayed via PNG re-encode fallback: {e})")
+
+    # 4) Tensorize & normalize (must match training)
     x = preprocess(img).unsqueeze(0).to(device)  # [1, 3, H, W], float32
 
     if model_choice == "MobileNetV2 (ft)":
