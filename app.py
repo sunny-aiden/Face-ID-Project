@@ -3,19 +3,21 @@
 # Models: MobileNetV2 (fine-tuned), SGD-Logistic, SGD-SVM, MLP/ANN, KNN (cosine).
 # Classical models consume 1280-D embeddings from MobileNetV2 (conv body + GAP).
 
+import io
+from collections import OrderedDict
+from pathlib import Path
+
+import joblib
+import numpy as np
+import pandas as pd
 import streamlit as st
 import torch
-from torch import nn
-from torchvision import models, transforms
 import torch.nn.functional as F
-from pathlib import Path
-from PIL import Image
-import numpy as np
-import joblib
-import pandas as pd
-from collections import OrderedDict
+from PIL import Image, ImageOps
+from torchvision import models, transforms
 from torchvision.models.mobilenetv2 import MobileNetV2
-import torch
+from torchvision.transforms import InterpolationMode
+from torch import nn
 
 # ── Paths & device ─────────────────────────────────────────────────────────
 PROJECT_ROOT = Path(__file__).parent
@@ -40,57 +42,80 @@ TEST_ACCURACY = {
     "MLP / ANN":        0.374,
     "KNN (cosine)":     0.268,
 }
-
 st.sidebar.header("🔍 Accuracy (Test)")
 acc_rows = [{"Model": k, "Accuracy": f"{v:.3f}"} for k, v in TEST_ACCURACY.items()]
 acc_df = pd.DataFrame(acc_rows).sort_values("Accuracy", ascending=False)
 st.sidebar.dataframe(acc_df, hide_index=True, use_container_width=True)
 
-# ── Preprocessing (must match training) ────────────────────────────────────
+# ── Image preprocessing (must match training) ──────────────────────────────
+# If you trained with different size/norm (e.g., ImageNet stats at 224),
+# update IMG_SIZE and mean/std accordingly.
 IMG_SIZE = (160, 160)
 preprocess = transforms.Compose([
-    transforms.Resize(IMG_SIZE),
-    transforms.ToTensor(),
-    transforms.Normalize([0.5]*3, [0.5]*3),
+    transforms.Resize(IMG_SIZE, interpolation=InterpolationMode.BILINEAR),
+    transforms.ToTensor(),                          # -> float32 [0,1]
+    transforms.Normalize([0.5, 0.5, 0.5],           # center to [-1,1]
+                         [0.5, 0.5, 0.5]),
 ])
 
-# ── Robust loaders ────────────────────────────────────────────────────────
-# replace your current helper with this
+def to_pil_rgb(img_in):
+    """Normalize any input (UploadedFile/bytes/ndarray/tensor/PIL) to PIL RGB.
+       Also applies EXIF orientation fix to keep faces upright."""
+    if isinstance(img_in, Image.Image):
+        img = img_in
+    elif hasattr(img_in, "read"):  # Streamlit UploadedFile
+        img = Image.open(img_in)
+    elif isinstance(img_in, (bytes, bytearray)):
+        img = Image.open(io.BytesIO(img_in))
+    elif isinstance(img_in, np.ndarray):
+        arr = img_in
+        if arr.dtype != np.uint8:
+            # scale float images in [0,1] to [0,255]
+            if arr.dtype.kind == "f":
+                arr = np.clip(arr, 0, 1) * 255.0
+            arr = arr.astype(np.uint8)
+        img = Image.fromarray(arr)
+    elif isinstance(img_in, torch.Tensor):
+        img = transforms.functional.to_pil_image(img_in.detach().cpu())
+    else:
+        raise TypeError(f"Unsupported input type: {type(img_in)}")
 
-from torchvision.models.mobilenetv2 import MobileNetV2
-import torch
+    img = ImageOps.exif_transpose(img)
+    if img.mode != "RGB":
+        img = img.convert("RGB")
+    return img
 
+# ── Robust Torch loaders ───────────────────────────────────────────────────
 def torch_load_any(p: Path):
-    """Load torch object under PyTorch 2.6+ safe loading rules."""
-    # allowlist MobileNetV2 so weights_only=True can unpickle it
+    """Load a torch object under safer rules.
+       Tries safe loading (weights_only=True) first; falls back if needed."""
     try:
+        # Allow MobileNetV2 class to be used during safe unpickling.
         torch.serialization.add_safe_globals([MobileNetV2])
     except Exception:
         pass
 
-    # try safe load first
     try:
         return torch.load(p, map_location=device, weights_only=True)
     except Exception:
-        # fallback: only do this if the file is from a trusted source (your own training)
+        # Fallback only for trusted checkpoints produced by your own code.
         return torch.load(p, map_location=device, weights_only=False)
-
 
 def load_finetuned_mobilenet(n_classes: int):
     """
     Load MobileNetV2 fine-tuned model from a .pkl file.
-    Handles two cases:
-      1) file contains a state_dict (OrderedDict or dict with 'state_dict')
-      2) file contains a full nn.Module
+    Supports two checkpoint styles:
+      (1) full nn.Module; (2) (state_dict) or {"state_dict": ...}.
+    Also ensures the classifier head matches the number of classes.
     """
-    cand = MODELS_DIR / "mobilenet_v2_best.pkl"
-    if not cand.exists():
-        st.error(f"Missing model file: {cand}")
+    ckpt = MODELS_DIR / "mobilenet_v2_best.pkl"
+    if not ckpt.exists():
+        st.error(f"Missing model file: {ckpt}")
         st.stop()
 
-    obj = torch_load_any(cand)
+    obj = torch_load_any(ckpt)
 
-    # Build a base MobileNetV2 with correct classifier shape
+    # base with ImageNet weights (swap head later)
     def build_blank(nc: int):
         m = models.mobilenet_v2(weights=models.MobileNet_V2_Weights.IMAGENET1K_V1)
         m.classifier[1] = nn.Linear(m.last_channel, nc)
@@ -98,45 +123,48 @@ def load_finetuned_mobilenet(n_classes: int):
 
     if isinstance(obj, nn.Module):
         model = obj
-        model.to(device).eval()
-        # (Optional) sanity: if out_features mismatches classes, replace head
+        # (optional) repair head if classes changed
         try:
             out = model.classifier[1].out_features
             if out != n_classes:
                 model.classifier[1] = nn.Linear(model.classifier[1].in_features, n_classes)
         except Exception:
             pass
-        return model
+        return model.to(device).eval()
 
-    # If it's a dict / state_dict, load into a fresh backbone with right head
+    # dict or state_dict path
     model = build_blank(n_classes)
     if isinstance(obj, (dict, OrderedDict)):
         state = obj.get("state_dict", obj)
-        missing, unexpected = model.load_state_dict(state, strict=False)
-        # Not fatal; just proceed
-    else:
-        st.error("Unsupported checkpoint format for MobileNetV2.")
-        st.stop()
+        model.load_state_dict(state, strict=False)  # tolerate minor key mismatches
+        return model.to(device).eval()
 
-    model.to(device).eval()
-    return model
+    st.error("Unsupported checkpoint format for MobileNetV2.")
+    st.stop()
 
 def load_sklearn_pickle(name: str):
+    """Load sklearn/joblib artifacts with friendly error messages.
+       Returns None if loading fails so the UI can degrade gracefully."""
     p = MODELS_DIR / name
     if not p.exists():
-        st.error(f"Missing model file: {p}")
-        st.stop()
-    return joblib.load(p)
+        st.warning(f"Missing model file: {p}")
+        return None
+    try:
+        return joblib.load(p)
+    except Exception as e:
+        st.warning(f"Could not load '{name}': {e}")
+        return None
 
 # ── Load models (cached) ───────────────────────────────────────────────────
 @st.cache_resource(show_spinner=True)
 def load_all_models():
-    # CNN head for end-to-end inference
+    # End-to-end CNN
     cnn = load_finetuned_mobilenet(len(CLASS_NAMES))
 
-    # Feature extractor: conv body only; produce 1280-D via GAP
+    # Feature extractor: we’ll use MobileNetV2 forward output as 1280-D embeddings.
+    # With classifier kept as Identity, torchvision’s forward already applies avgpool+flatten.
     extractor = models.mobilenet_v2(weights=models.MobileNet_V2_Weights.IMAGENET1K_V1)
-    extractor.classifier = nn.Identity()
+    extractor.classifier = nn.Identity()  # keep avgpool inside forward
     extractor.to(device).eval()
 
     # Classical estimators saved as sklearn pipelines
@@ -151,11 +179,21 @@ extractor, cnn_model, log_model, svm_model, knn_model, mlp_model = load_all_mode
 
 @torch.no_grad()
 def embed_1280(x: torch.Tensor) -> np.ndarray:
-    """Run conv body → AdaptiveAvgPool2d → flatten to (B,1280)."""
-    f = extractor(x)                 # (B, 1280, H', W')
-    f = F.adaptive_avg_pool2d(f, (1, 1))
-    f = torch.flatten(f, 1)          # (B, 1280)
-    return f.cpu().numpy()
+    """
+    Get 1280-D embeddings from MobileNetV2.
+    If extractor already returns (B, 1280), use it.
+    If it returns a spatial map (B, 1280, H, W), pool+flatten.
+    """
+    z = extractor(x)
+    if not isinstance(z, torch.Tensor):
+        raise RuntimeError("Extractor did not return a tensor.")
+    if z.ndim == 2 and z.shape[1] == 1280:
+        return z.cpu().numpy()
+    if z.ndim == 4 and z.shape[1] == 1280:
+        z = F.adaptive_avg_pool2d(z, (1, 1))
+        z = torch.flatten(z, 1)
+        return z.cpu().numpy()
+    raise RuntimeError(f"Unexpected extractor output shape: {tuple(z.shape)}")
 
 # ── UI ─────────────────────────────────────────────────────────────────────
 st.title("🔐 Face-ID Classifier")
@@ -167,28 +205,41 @@ model_choice = st.selectbox(
 )
 
 if uploaded:
-    img = Image.open(uploaded).convert("RGB")
-    st.image(img, caption="Your input", use_column_width=True)
+    # Normalize all inputs to PIL RGB; prevents ToTensor()/dtype/mode issues
+    img = to_pil_rgb(uploaded)
+    st.image(img, caption="Your input", use_container_width=True)
 
-    x = preprocess(img).unsqueeze(0).to(device)
+    x = preprocess(img).unsqueeze(0).to(device)  # [1, 3, H, W], float32
 
     if model_choice == "MobileNetV2 (ft)":
-        with torch.no_grad():
+        with torch.inference_mode():
             logits = cnn_model(x)
             probs = torch.softmax(logits, dim=1).squeeze(0).cpu().numpy()
             idx = int(np.argmax(probs))
-        st.success(f"🏷️ Predicted identity: **{CLASS_NAMES[idx]}**")
+        label = CLASS_NAMES[idx] if 0 <= idx < len(CLASS_NAMES) else "N/A"
+        st.success(f"🏷️ Predicted identity: **{label}**")
+
     else:
         # Classical models: first get 1280-D embeddings
         feats = embed_1280(x)
+        chosen = None
         if model_choice == "SGD-Logistic":
-            idx = int(log_model.predict(feats)[0])
+            chosen = log_model
         elif model_choice == "SGD-SVM":
-            idx = int(svm_model.predict(feats)[0])
+            chosen = svm_model
         elif model_choice == "MLP / ANN":
-            idx = int(mlp_model.predict(feats)[0])
+            chosen = mlp_model
         else:
-            idx = int(knn_model.predict(feats)[0])
-        st.success(f"🏷️ Predicted identity: **{CLASS_NAMES[idx]}**")
+            chosen = knn_model
+
+        if chosen is None:
+            st.warning("Selected classical model is unavailable. Check model files / versions.")
+        else:
+            try:
+                idx = int(chosen.predict(feats)[0])
+                label = CLASS_NAMES[idx] if 0 <= idx < len(CLASS_NAMES) else "N/A"
+                st.success(f"🏷️ Predicted identity: **{label}**")
+            except Exception as e:
+                st.error(f"Inference failed for {model_choice}: {e}")
 
 st.caption("Sidebar shows **test** accuracy only. Models load from ./models. Class list from ./data/processed/train.")
