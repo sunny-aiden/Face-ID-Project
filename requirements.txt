@@ -1,7 +1,11 @@
-streamlit>=1.33
-torch==2.3.1
-torchvision==0.18.1
-scikit-learn>=1.4
-pillow
-numpy
-joblib
+# requirements.txt
+--extra-index-url https://download.pytorch.org/whl/cpu
+
+numpy==1.26.4
+pillow==10.3.0
+joblib==1.3.2
+scikit-learn==1.4.2
+torch==2.2.2+cpu
+torchvision==0.17.2+cpu
+streamlit==1.35.0
+huggingface_hub==0.23.0   # only if you download models at runtime; remove if not used
