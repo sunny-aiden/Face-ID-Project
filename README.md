@@ -1,8 +1,30 @@
 # Face-ID-Project
 
-## Face Identification on LFW — Classical ML vs Fine-tuned CNN
+## 8) Team Member Roles & Contributions
 
-Practical face identification built on the **Labeled Faces in the Wild (LFW)** dataset. This project combines classical machine learning baselines trained on frozen deep embeddings with an end-to-end fine-tuned MobileNetV2 CNN to handle the challenges of many identities with few examples and in-the-wild variability.
+| Role | Name | Key Contributions |
+|------|------|-------------------|
+| **Data & Cleaning** | Yorbis Daniel Alarcon | LFW download/verify, RGB/resize, identity-wise split |
+| **EDA & Reporting** | Ramandeep Kaur | Class distribution, brightness/contrast, visuals |
+| **Modeling – ML** | All members | Embeddings cache, SGD-Log/SVM/KNN/MLP training & tuning |
+| **Modeling – CNN & App** | Sangsun Lee | Optuna (TPE) study for CNN — search over lr, dropout, weight decay, unfreeze with pruning; manual/random grids for ML (SGD-Logistic & SGD-SVM α/η₀/schedule, KNN k/metric, MLP PCA/hidden/α/lr/batch); validation ranking, best-model checkpoints, consolidated scoreboard. |
+
+
+| **Hyperparameter Tuning** | All members | Class distribution, brightness/contrast, visuals |
+
+| Role                      | Name                                | Key Contributions                                                                                                                                                                                                                                                                                        |
+| ------------------------- | ----------------------------------- | -------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- |
+| **Data & Cleaning**       | **Yorbis Daniel Alarcon**           | LFW acquisition & integrity checks; RGB conversion and 160×160 resize; identity-wise 70/15/15 split; cleaning log JSON.                                                                                                                                                                                  |
+| **EDA & Reporting**       | **Ramandeep Kaur**                  | Class distribution (long-tail) analysis; brightness/contrast histograms; sample grids; figures and narrative for report.                                                                                                                                                                                 |
+| **Modeling — ML**         | **All members**                     | MobileNetV2 embedding cache; baselines: SGD-Logistic, SGD-SVM, KNN, and MLP (ANN); training/evaluation scripts and metrics.                                                                                                                                                                              |
+| **Modeling — CNN**        | **Sangsun Lee**                     | MobileNetV2 fine-tuning (partial unfreeze + dropout); checkpoints, early stopping, result tracking.                                                                                                                                                                                                      |
+| **Hyperparameter Tuning** | **All members ** | Optuna (TPE) study for CNN — search over **lr**, **dropout**, **weight decay**, **unfreeze depth** with pruning; manual/random grids for ML (SGD-Logistic & SGD-SVM: α/η₀/schedule; KNN: *k*/metric; MLP: PCA/hidden/α/lr/batch); validation ranking; best-model checkpointing; consolidated scoreboard. |
+| **Demo & Deployment**     | **Krunal Patel**     | Streamlit app (image upload, model selector, prediction + **test accuracy** in sidebar); safe model loading (torch/joblib); packaging (`requirements.txt`, `.python-version`), GitHub setup, and Streamlit Community Cloud deployment guidance.                                                          |
+
+
+## Dataset - Face Identification on LFW — Classical ML vs Fine-tuned CNN
+
+Practical face identification built on the **Labeled Faces in the Wild (LFW)** dataset. This project combines classical machine learning baselines trained on frozen deep embeddings with an end-to-end fine-tuned MobileNetV2 CNN to handle the challenges of many identities with few examples and in-the-wild variability. Dataset can be downloaded here: https://www.kaggle.com/datasets/jessicali9530/lfw-dataset
 
 ---
 
@@ -129,12 +151,4 @@ Windows: find PID via `netstat -ano | findstr :8501` then `taskkill /PID <PID> /
 
 ---
 
-## 8) Team Member Roles & Contributions
 
-| Role | Name | Key Contributions |
-|------|------|-------------------|
-| **Project Lead / PM** | _Name_ | Scope, integration, final QA |
-| **Data & Cleaning** | _Name_ | LFW download/verify, RGB/resize, identity-wise split |
-| **EDA & Reporting** | _Name_ | Class distribution, brightness/contrast, visuals |
-| **Modeling – ML** | _Name_ | Embeddings cache, SGD-Log/SVM/KNN/MLP training & tuning |
-| **Modeling – CNN & App** | _Name_ | MobileNetV2 fine-tune, Optuna, checkpoints, Streamlit app |
