@@ -1,16 +1,5 @@
 # Face-ID-Project
 
-## 8) Team Member Roles & Contributions
-
-| Role | Name | Key Contributions |
-|------|------|-------------------|
-| **Data & Cleaning** | Yorbis Daniel Alarcon | LFW download/verify, RGB/resize, identity-wise split |
-| **EDA & Reporting** | Ramandeep Kaur | Class distribution, brightness/contrast, visuals |
-| **Modeling – ML** | All members | Embeddings cache, SGD-Log/SVM/KNN/MLP training & tuning |
-| **Modeling – CNN & App** | Sangsun Lee | Optuna (TPE) study for CNN — search over lr, dropout, weight decay, unfreeze with pruning; manual/random grids for ML (SGD-Logistic & SGD-SVM α/η₀/schedule, KNN k/metric, MLP PCA/hidden/α/lr/batch); validation ranking, best-model checkpoints, consolidated scoreboard. |
-
-
-| **Hyperparameter Tuning** | All members | Class distribution, brightness/contrast, visuals |
 
 | Role                      | Name                                | Key Contributions                                                                                                                                                                                                                                                                                        |
 | ------------------------- | ----------------------------------- | -------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- |
